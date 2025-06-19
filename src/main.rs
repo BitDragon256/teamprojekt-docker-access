@@ -108,12 +108,14 @@ async fn llm_api_response() -> impl axum::response::IntoResponse {
 }
 fn setup_llm_api_endpoints() -> Result<()> {
     let addr = SocketAddr::from(([0,0,0,0], 3000));
-    let server = Server::new(addr);
+    let server =
+        Server::new(addr)
+            .with_handle("/", |request| {
+                println!("Incoming request:\nSTART>>>{}<<<END", request.body);
+                HttpResponse { body: "HTTP/1.1 200 OK\n\n42\n".to_owned(), ..Default::default() }
+            });
 
-    server.run(|request| {
-        println!("Incoming request:\nSTART>>>{}<<<END", request.content);
-        HttpResponse { content: "HTTP/1.1 200 OK\n\n42\n".to_owned() }
-    })?;
+    server.run()?;
 
     Ok(())
 }
