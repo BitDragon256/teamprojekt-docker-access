@@ -1,8 +1,10 @@
+use std::fmt::{Display, Formatter};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream, SocketAddr};
 use tokio::task;
 
-enum Error {
+#[derive(Debug)]
+pub enum Error {
     ConnectionFailed(String),
     IOError(String),
 }
@@ -13,35 +15,51 @@ impl From<std::io::Error> for Error {
     }
 }
 
+impl Display for Error {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "HTTP Error: {:?}", self)
+    }
+}
+
+impl std::error::Error for Error {}
+
 type Result<T> = std::result::Result<T, Error>;
 
-struct Server {
+pub struct Server {
     addr: SocketAddr,
 }
 
-struct HttpRequest {
-    content: String,
+pub struct HttpRequest {
+    pub content: String,
 }
-struct HttpResponse {
-    content: String,
+pub struct HttpResponse {
+    pub content: String,
 }
 
-async fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest> {
+fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest> {
     // TODO timeout
-    let mut content = String::new(); stream.read_to_string(&mut content)?;
+    // TODO buffer size
+    let mut buf = [0;1000]; stream.read(&mut buf);
+    let content = String::from_utf8_lossy(&buf).to_string();
     Ok(HttpRequest {
         content,
     })
 }
 
-async fn write_http_response(stream: &mut TcpStream, response: HttpResponse) -> Result<()> {
+fn write_http_response(stream: &mut TcpStream, response: HttpResponse) -> Result<()> {
     // TODO timeout
     stream.write_all(response.content.as_bytes())?;
     Ok(())
 }
 
 impl Server {
-    pub async fn run<F>(self, handler: F) -> Result<()>
+    pub(crate) fn new(addr: SocketAddr) -> Self {
+        Self {
+            addr
+        }
+    }
+
+    pub fn run<F>(self, handler: F) -> Result<()>
     where
         F: Fn(HttpRequest) -> HttpResponse
     {
@@ -50,15 +68,13 @@ impl Server {
         for stream in listener.incoming() {
             match stream {
                 Ok(mut stream) => {
-                    let request = read_http_request(&mut stream).await?;
+                    let request = read_http_request(&mut stream)?;
 
-                    task::spawn(async move {
-                        let response = handler(request);
+                    let response = handler(request);
 
-                        write_http_response(&mut stream, response).await?;
-                    });
+                    write_http_response(&mut stream, response)?;
                 }
-                Err(err) => return Err(Error::ConnectionFailed(err.into()))
+                Err(err) => return Err(Error::ConnectionFailed(format!("{}", err)))
             }
         }
 

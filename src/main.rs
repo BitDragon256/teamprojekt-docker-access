@@ -8,7 +8,7 @@ use bollard::Docker;
 use bollard::container::{StartContainerOptions, Config, DownloadFromContainerOptions};
 use futures_util::StreamExt;
 use tar::Archive;
-use axum::{Router};
+use crate::http_server::{HttpRequest, HttpResponse, Server};
 
 struct AgentEnvironment {
     pub agent_container_image: String,
@@ -36,6 +36,41 @@ fn test_agent(environment: AgentEnvironment, actions: AgentExpectedActions) -> b
 
 // ==============================
 
+impl AgentEnvironment {
+    pub fn new(agent_image: &str) -> Self {
+        Self {
+            agent_container_image: agent_image.to_owned(),
+            llm_responses: Vec::new(),
+        }
+    }
+
+    /// Expect a llm prompt and send back the given `response`.
+    /// If `exact_prompt` is not `None`, the received llm prompt has to correspond to it.
+    pub fn expect_llm_call(mut self, response: &str, exact_prompt: Option<&str>) -> Self {
+        self
+    }
+
+    /// Expect a termination request of the agent indicating success
+    pub fn expect_success(mut self) -> Self {
+        self
+    }
+
+    /// Expect a termination request of the agent indicating failure with a corresponding failure report.
+    /// If `failure_report` is not `None`, the received failure report has to correspond to it.
+    pub fn expect_failure(mut self, failure_report: Option<&str>) -> Self {
+        self
+    }
+
+    /// Test for the existence of a file with file name `file_name`.
+    /// If the file is under a specific path, this path has to be included in the file name.
+    /// An optional file content can be specified with `content` (is only tested if `content` is not `None`)
+    pub fn expect_file(mut self, file_name: &str, content: Option<&str>) -> Self {
+        self
+    }
+}
+
+// ==============================
+
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 fn get_docker() -> Result<Docker> {
@@ -50,7 +85,7 @@ async fn main_loop() -> Result<()> {
     let docker = get_docker()?;
 
     // setup LLM API endpoints
-    setup_llm_api_endpoints().await?;
+    setup_llm_api_endpoints()?;
 
     // setup Task API endpoints
 
@@ -71,13 +106,14 @@ async fn main_loop() -> Result<()> {
 async fn llm_api_response() -> impl axum::response::IntoResponse {
     "hello world!"
 }
-async fn setup_llm_api_endpoints() -> Result<()> {
-    let app = Router::new()
-        .route("/data", axum::routing::get(llm_api_response));
-    let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
+fn setup_llm_api_endpoints() -> Result<()> {
+    let addr = SocketAddr::from(([0,0,0,0], 3000));
+    let server = Server::new(addr);
 
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    server.run(|request| {
+        println!("Incoming request:\nSTART>>>{}<<<END", request.content);
+        HttpResponse { content: "HTTP/1.1 200 OK\n\n42\n".to_owned() }
+    })?;
 
     Ok(())
 }
