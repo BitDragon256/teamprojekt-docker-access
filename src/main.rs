@@ -235,15 +235,17 @@ impl AgentEnvironment {
     fn setup_api_endpoints(&self) -> Result<tokio::task::JoinHandle<()>> {
         let addr = SocketAddr::from(([0,0,0,0], 3000));
         let server =
-            Server::new(addr, ServerContext{ task: self.task.clone() })
+            Server::new(addr, ServerContext{
+                task: self.task.clone(),
+            })
                 // Task API
                 .with_handle(APIEndpoint::TaskSuccess.into(), |request, context| {
                     println!("Task succeeded: {}", request.body);
-                    HttpResponse::ok()
+                    HttpResponse::ok().terminate()
                 })
                 .with_handle(APIEndpoint::TaskFailure.into(), |request, context| {
                     println!("Task failed: {}", request.body);
-                    HttpResponse::ok()
+                    HttpResponse::ok().terminate()
                 })
                 .with_handle(APIEndpoint::TaskInfo.into(), |request, context| {
                     println!("Task requested");
@@ -257,7 +259,7 @@ impl AgentEnvironment {
             ;
 
         Ok(tokio::spawn(async move {
-            server.run().unwrap_or_else(|err| println!("The server encountered a critical error: {}\nRestarting server...", err));
+            server.run().unwrap_or_else(|err| println!("The server encountered a critical error: {}", err));
         }))
     }
 }

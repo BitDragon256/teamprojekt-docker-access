@@ -69,6 +69,8 @@ pub struct HttpResponse {
     pub headers: HashMap<String, String>,
     pub status_code: StatusCode,
     pub body: String,
+
+    pub terminate_server: bool,
 }
 
 impl HttpResponse {
@@ -77,6 +79,7 @@ impl HttpResponse {
             headers: HashMap::new(),
             status_code: 0,
             body: String::new(),
+            terminate_server: false,
         }
     }
     pub fn not_found() -> Self {
@@ -96,6 +99,10 @@ impl HttpResponse {
     }
     pub fn json<T: Serialize>(mut self, content: &T) -> Self {
         self.body = serde_json::to_string(content).unwrap(); // this should not panic
+        self
+    }
+    pub fn terminate(mut self) -> Self {
+        self.terminate_server = true;
         self
     }
 }
@@ -225,8 +232,7 @@ impl<T> Server<T> {
         self
     }
 
-    pub fn run(mut self) -> Result<()>
-    {
+    pub fn run(mut self) -> Result<()> {
         let listener = TcpListener::bind(self.addr)?;
 
         for stream in listener.incoming() {
@@ -235,8 +241,11 @@ impl<T> Server<T> {
                     let request = read_http_request(&mut stream)?;
 
                     let response = self.handles.get(&request.request_target).map(|handle| handle(request.clone(), &mut self.context)).unwrap_or_else(|| (self.else_handle)(request));
+                    let terminate = response.terminate_server;
 
                     write_http_response(&mut stream, response)?;
+
+                    if terminate { break; }
                 }
                 Err(err) => return Err(Error::ConnectionFailed(format!("{}", err)))
             }
