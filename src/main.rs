@@ -106,6 +106,10 @@ impl Task {
     }
 }
 
+struct ServerContext {
+    pub task: Task,
+}
+
 // ==============================
 
 impl AgentEnvironment {
@@ -231,19 +235,19 @@ impl AgentEnvironment {
     fn setup_api_endpoints(&self) -> Result<tokio::task::JoinHandle<()>> {
         let addr = SocketAddr::from(([0,0,0,0], 3000));
         let server =
-            Server::new(addr)
+            Server::new(addr, ServerContext{ task: self.task.clone() })
                 // Task API
-                .with_handle(APIEndpoint::TaskSuccess.into(), |request| {
+                .with_handle(APIEndpoint::TaskSuccess.into(), |request, context| {
                     println!("Task succeeded: {}", request.body);
                     HttpResponse::ok()
                 })
-                .with_handle(APIEndpoint::TaskFailure.into(), |request| {
+                .with_handle(APIEndpoint::TaskFailure.into(), |request, context| {
                     println!("Task failed: {}", request.body);
                     HttpResponse::ok()
                 })
-                .with_handle(APIEndpoint::TaskInfo.into(), |request| {
+                .with_handle(APIEndpoint::TaskInfo.into(), |request, context| {
                     println!("Task requested");
-                    HttpResponse::ok()//.json(&self.task.clone())
+                    HttpResponse::ok().json(&context.task.clone())
                 })
                 // Rest of endpoints
                 .with_else_handle(|request| {

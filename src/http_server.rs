@@ -37,12 +37,13 @@ enum RequestType {
 
 // ==============================
 
-pub struct Server {
+pub struct Server<T = ()> {
     addr: SocketAddr,
 
     // handles: HashMap<String, Box<dyn Fn(HttpRequest) -> HttpResponse + Send>>,
-    handles: HashMap<String, fn(HttpRequest) -> HttpResponse>,
+    handles: HashMap<String, fn(HttpRequest, &mut T) -> HttpResponse>,
     else_handle: fn(HttpRequest) -> HttpResponse,
+    pub context: T,
 }
 
 #[derive(Clone)]
@@ -200,18 +201,19 @@ fn write_http_response(stream: &mut TcpStream, response: HttpResponse) -> Result
     Ok(())
 }
 
-impl Server {
-    pub(crate) fn new(addr: SocketAddr) -> Self {
+impl<T> Server<T> {
+    pub(crate) fn new(addr: SocketAddr, context: T) -> Self {
         Self {
             addr,
             handles: HashMap::new(),
             else_handle: |_| HttpResponse::not_found(),
+            context,
         }
     }
 
     /// Set handle for a specific endpoint.
     // pub fn with_handle(mut self, endpoint: &str, handle: impl Fn(HttpRequest) -> HttpResponse + Send) -> Self {
-    pub fn with_handle(mut self, endpoint: &str, handle: fn(HttpRequest) -> HttpResponse) -> Self {
+    pub fn with_handle(mut self, endpoint: &str, handle: fn(HttpRequest, &mut T) -> HttpResponse) -> Self {
         // self.handles.insert(endpoint.to_owned(), Box::new(handle));
         self.handles.insert(endpoint.to_owned(), handle);
         self
@@ -223,7 +225,7 @@ impl Server {
         self
     }
 
-    pub fn run(self) -> Result<()>
+    pub fn run(mut self) -> Result<()>
     {
         let listener = TcpListener::bind(self.addr)?;
 
@@ -232,7 +234,7 @@ impl Server {
                 Ok(mut stream) => {
                     let request = read_http_request(&mut stream)?;
 
-                    let response = self.handles.get(&request.request_target).map(|handle| handle(request.clone())).unwrap_or_else(|| (self.else_handle)(request));
+                    let response = self.handles.get(&request.request_target).map(|handle| handle(request.clone(), &mut self.context)).unwrap_or_else(|| (self.else_handle)(request));
 
                     write_http_response(&mut stream, response)?;
                 }
