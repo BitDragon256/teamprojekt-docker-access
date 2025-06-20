@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream, SocketAddr};
+use serde::Serialize;
 
 #[derive(Debug)]
 pub enum Error {
@@ -28,6 +29,7 @@ type Result<T> = std::result::Result<T, Error>;
 
 // ==============================
 
+#[derive(Clone)]
 enum RequestType {
     GET,
     POST,
@@ -38,9 +40,11 @@ enum RequestType {
 pub struct Server {
     addr: SocketAddr,
 
-    handles: HashMap<String, fn(HttpRequest) -> HttpResponse>,
+    handles: HashMap<String, Box<dyn Fn(HttpRequest) -> HttpResponse>>,
+    else_handle: fn(HttpRequest) -> HttpResponse,
 }
 
+#[derive(Clone)]
 pub struct HttpRequest {
     /// Describes the meaning and desired outcome of the request, e.g. GET if the client wants a resource in return
     pub method: RequestType,
@@ -58,6 +62,7 @@ pub struct HttpRequest {
     /// The actual content of the request
     pub body: String,
 }
+#[derive(Clone)]
 pub struct HttpResponse {
     pub headers: HashMap<String, String>,
     pub status_code: StatusCode,
@@ -65,20 +70,31 @@ pub struct HttpResponse {
 }
 
 impl HttpResponse {
-    pub fn not_found() -> Self {
-        Self {
-            status_code: 404,
-            ..Default::default()
-        }
-    }
-}
-impl Default for HttpResponse {
-    fn default() -> Self {
+    fn new() -> Self {
         Self {
             headers: HashMap::new(),
-            status_code: 200,
+            status_code: 0,
             body: String::new(),
         }
+    }
+    pub fn not_found() -> Self {
+        let mut s = Self::new();
+        s.status_code = 404;
+        s
+    }
+    pub fn ok() -> Self {
+        let mut s = Self::new();
+        s.status_code = 200;
+        s
+    }
+
+    pub fn text(mut self, body: &str) -> Self {
+        self.body = body.to_owned();
+        self
+    }
+    pub fn json<T: Serialize>(mut self, content: &T) -> Self {
+        self.body = serde_json::to_string(content).unwrap(); // this should not panic
+        self
     }
 }
 
@@ -149,7 +165,7 @@ fn parse_http_request(content: &str) -> Result<HttpRequest> {
 fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest> {
     // TODO timeout
     // TODO buffer size
-    let mut buf = [0;1000]; stream.read(&mut buf);
+    let mut buf = [0;1000]; stream.read(&mut buf)?;
     let content = String::from_utf8_lossy(&buf).to_string();
     parse_http_request(&content)
 }
@@ -188,11 +204,19 @@ impl Server {
         Self {
             addr,
             handles: HashMap::new(),
+            else_handle: |_| HttpResponse::not_found(),
         }
     }
 
-    pub fn with_handle(mut self, endpoint: &str, handle: fn(HttpRequest) -> HttpResponse) -> Self {
-        self.handles.insert(endpoint.to_owned(), handle);
+    /// Set handle for a specific endpoint.
+    pub fn with_handle(mut self, endpoint: &str, handle: impl Fn(HttpRequest) -> HttpResponse) -> Self {
+        self.handles.insert(endpoint.to_owned(), Box::new(handle));
+        self
+    }
+
+    /// Set handle which is called when the endpoint is not recognized.
+    pub fn with_else_handle(mut self, handle: fn(HttpRequest) -> HttpResponse) -> Self {
+        self.else_handle = handle;
         self
     }
 
@@ -205,7 +229,7 @@ impl Server {
                 Ok(mut stream) => {
                     let request = read_http_request(&mut stream)?;
 
-                    let response = self.handles.get(&request.request_target).map(|handle| handle(request)).unwrap_or(HttpResponse::not_found());
+                    let response = self.handles.get(&request.request_target).map(|handle| handle(request.clone())).unwrap_or_else(|| (self.else_handle)(request));
 
                     write_http_response(&mut stream, response)?;
                 }

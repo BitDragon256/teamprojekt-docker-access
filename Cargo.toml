@@ -8,4 +8,5 @@ bollard = "0.15"
 tokio = { version = "1", features = ["full"] }
 futures-util = "0.3"
 tar = "0.4"
-axum = "0.7"
+serde = "1.0"
+serde_json = "1.0"
