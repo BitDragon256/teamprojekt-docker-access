@@ -243,7 +243,7 @@ impl AgentEnvironment {
                 })
                 .with_handle(APIEndpoint::TaskInfo.into(), |request| {
                     println!("Task requested");
-                    HttpResponse::ok().json(&self.task.clone())
+                    HttpResponse::ok()//.json(&self.task.clone())
                 })
                 // Rest of endpoints
                 .with_else_handle(|request| {

@@ -40,7 +40,8 @@ enum RequestType {
 pub struct Server {
     addr: SocketAddr,
 
-    handles: HashMap<String, Box<dyn Fn(HttpRequest) -> HttpResponse>>,
+    // handles: HashMap<String, Box<dyn Fn(HttpRequest) -> HttpResponse + Send>>,
+    handles: HashMap<String, fn(HttpRequest) -> HttpResponse>,
     else_handle: fn(HttpRequest) -> HttpResponse,
 }
 
@@ -209,8 +210,10 @@ impl Server {
     }
 
     /// Set handle for a specific endpoint.
-    pub fn with_handle(mut self, endpoint: &str, handle: impl Fn(HttpRequest) -> HttpResponse) -> Self {
-        self.handles.insert(endpoint.to_owned(), Box::new(handle));
+    // pub fn with_handle(mut self, endpoint: &str, handle: impl Fn(HttpRequest) -> HttpResponse + Send) -> Self {
+    pub fn with_handle(mut self, endpoint: &str, handle: fn(HttpRequest) -> HttpResponse) -> Self {
+        // self.handles.insert(endpoint.to_owned(), Box::new(handle));
+        self.handles.insert(endpoint.to_owned(), handle);
         self
     }
 
