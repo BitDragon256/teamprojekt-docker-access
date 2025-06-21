@@ -2,9 +2,7 @@ use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream, SocketAddr};
-use std::str::FromStr;
 use serde::Serialize;
-use url::Url;
 
 #[derive(Debug)]
 pub enum Error {
@@ -14,6 +12,14 @@ pub enum Error {
     InvalidRequestEndpoint(String),
     InvalidEndpoint(String),
 }
+
+impl Display for Error {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "HTTP Server Error: {:?}", self)
+    }
+}
+
+impl std::error::Error for Error {}
 
 fn format_relative_url(url: &str) -> Option<String> {
     if !url.ends_with("/") {
@@ -29,15 +35,7 @@ impl From<std::io::Error> for Error {
     }
 }
 
-impl Display for Error {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "HTTP Error: {:?}", self)
-    }
-}
-
-impl std::error::Error for Error {}
-
-type Result<T> = std::result::Result<T, Error>;
+pub(crate) type Result<T> = std::result::Result<T, Error>;
 
 // ==============================
 
@@ -245,7 +243,9 @@ impl<T> Server<T> {
         self
     }
 
-    pub fn run(mut self) -> Result<()> {
+    /// Starts the server, consuming it. It runs until a response is sent containing the termination flag.
+    /// The context is returned on shutdown.
+    pub fn run(mut self) -> Result<T> {
         let listener = TcpListener::bind(self.addr)?;
 
         for stream in listener.incoming() {
@@ -260,8 +260,6 @@ impl<T> Server<T> {
                         .unwrap_or_else(|| (self.else_handle)(request));
                     let terminate = response.terminate_server;
 
-                    println!("reponse: {}", response.body);
-
                     write_http_response(&mut stream, response)?;
 
                     if terminate { break; }
@@ -270,6 +268,6 @@ impl<T> Server<T> {
             }
         }
 
-        Ok(())
+        Ok(self.context)
     }
 }
