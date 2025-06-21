@@ -2,13 +2,25 @@ use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream, SocketAddr};
+use std::str::FromStr;
 use serde::Serialize;
+use url::Url;
 
 #[derive(Debug)]
 pub enum Error {
     ConnectionFailed(String),
     IOError(String),
     InvalidRequest(String),
+    InvalidRequestEndpoint(String),
+    InvalidEndpoint(String),
+}
+
+fn format_relative_url(url: &str) -> Option<String> {
+    if !url.ends_with("/") {
+        Some(format!("{}/", url))
+    } else {
+        Some(format!("{}", url))
+    }
 }
 
 impl From<std::io::Error> for Error {
@@ -99,6 +111,7 @@ impl HttpResponse {
     }
     pub fn json<T: Serialize>(mut self, content: &T) -> Self {
         self.body = serde_json::to_string(content).unwrap(); // this should not panic
+        self.headers.insert("Content-Type".to_owned(), "application/json".to_owned());
         self
     }
     pub fn terminate(mut self) -> Self {
@@ -220,10 +233,10 @@ impl<T> Server<T> {
 
     /// Set handle for a specific endpoint.
     // pub fn with_handle(mut self, endpoint: &str, handle: impl Fn(HttpRequest) -> HttpResponse + Send) -> Self {
-    pub fn with_handle(mut self, endpoint: &str, handle: fn(HttpRequest, &mut T) -> HttpResponse) -> Self {
+    pub fn with_handle(mut self, endpoint: &str, handle: fn(HttpRequest, &mut T) -> HttpResponse) -> Result<Self> {
         // self.handles.insert(endpoint.to_owned(), Box::new(handle));
-        self.handles.insert(endpoint.to_owned(), handle);
-        self
+        self.handles.insert(format_relative_url(endpoint).ok_or(Error::InvalidEndpoint(endpoint.to_owned()))?, handle);
+        Ok(self)
     }
 
     /// Set handle which is called when the endpoint is not recognized.
@@ -238,10 +251,16 @@ impl<T> Server<T> {
         for stream in listener.incoming() {
             match stream {
                 Ok(mut stream) => {
-                    let request = read_http_request(&mut stream)?;
+                    let mut request = read_http_request(&mut stream)?;
+                    request.request_target = format_relative_url(&request.request_target).ok_or(Error::InvalidRequestEndpoint(request.request_target.clone()))?;
 
-                    let response = self.handles.get(&request.request_target).map(|handle| handle(request.clone(), &mut self.context)).unwrap_or_else(|| (self.else_handle)(request));
+                    let response = self.handles
+                        .get(&request.request_target)
+                        .map(|handle| handle(request.clone(), &mut self.context))
+                        .unwrap_or_else(|| (self.else_handle)(request));
                     let terminate = response.terminate_server;
+
+                    println!("reponse: {}", response.body);
 
                     write_http_response(&mut stream, response)?;
 

@@ -27,8 +27,8 @@ impl Into<&str> for APIEndpoint {
         match self {
             APIEndpoint::TaskSuccess => "/api/agent/task/complete",
             APIEndpoint::TaskFailure => "/api/agent/task/fail",
-            APIEndpoint::TaskInfo => "/api/agent/task",
-            APIEndpoint::LLMRequest => "/api/*",
+            APIEndpoint::TaskInfo =>    "/api/agent/task",
+            APIEndpoint::LLMRequest =>  "/api/chat/completions",
         }
     }
 }
@@ -242,15 +242,35 @@ impl AgentEnvironment {
                 .with_handle(APIEndpoint::TaskSuccess.into(), |request, context| {
                     println!("Task succeeded: {}", request.body);
                     HttpResponse::ok().terminate()
-                })
+                })?
                 .with_handle(APIEndpoint::TaskFailure.into(), |request, context| {
                     println!("Task failed: {}", request.body);
                     HttpResponse::ok().terminate()
-                })
+                })?
                 .with_handle(APIEndpoint::TaskInfo.into(), |request, context| {
                     println!("Task requested");
                     HttpResponse::ok().json(&context.task.clone())
-                })
+                })?
+                .with_handle(APIEndpoint::LLMRequest.into(), |request, context| {
+                    HttpResponse::ok().json(&serde_json::json!({
+                        "choices": [
+                            {
+                                "finish_reason": "done",
+                                "index": 0,
+                                "message": {
+                                    "role": "assistant",
+                                    "content": "hello world",
+                                },
+                            },
+                        ],
+                        "usage": {
+                            "completion_tokens": 0,
+                            "prompt_tokens": 0,
+                            "total_tokens": 0,
+                        }
+                    }))
+                })?
+
                 // Rest of endpoints
                 .with_else_handle(|request| {
                     println!("Request on unknown endpoint: {}", request.request_target);
@@ -273,7 +293,11 @@ fn get_docker() -> Result<Docker> {
 }
 
 fn main() {
-    let test_env = AgentEnvironment::new("agent-42");
+    let test_env = AgentEnvironment::new("agent-42")
+        .with_task(&Task::new("Do nothing"))
+        .expect_llm_call(&LLMResponse::Message("Do nothing".to_owned()), None)
+        .expect_failure(None)
+        ;
     test_env.run();
 }
 
