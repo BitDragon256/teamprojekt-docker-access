@@ -50,8 +50,10 @@ enum TestLog {
 enum TestFailure {
     CallToFailure,
     CallToSuccess,
+    CallToTaskInfo,
     CallToLLM(String),
     AgentCrashed(String),
+    ActionsMissing(Vec<AgentExpectedAction>),
     Multiple(Box<TestFailure>, Box<TestFailure>),
 }
 
@@ -60,15 +62,17 @@ impl Display for TestFailure {
         match self {
             TestFailure::CallToFailure => write!(f, "Unexpected call to the failure endpoint"),
             TestFailure::CallToSuccess => write!(f, "Unexpected call to the success endpoint"),
+            TestFailure::CallToTaskInfo => write!(f, "Unexpected call to the Task API"),
             TestFailure::CallToLLM(prompt) =>  write!(f, "Unexpected LLM call with prompt: {}", prompt),
             TestFailure::AgentCrashed(err) => write!(f, "The agent crashed with error: {}", err),
+            TestFailure::ActionsMissing(actions) => write!(f, "There are actions missing, but the agent already stopped: {:?}", actions),
             TestFailure::Multiple(a, b) => write!(f, "Multiple failure reasons:\n    {}\n    {}", *a, *b),
         }
     }
 }
 
 #[derive(Clone)]
-struct AgentTestRun {
+struct AgentTestFinishedRun {
     /// All registered actions of the agent
     pub log: Vec<TestLog>,
 
@@ -77,9 +81,7 @@ struct AgentTestRun {
 }
 
 #[derive(Clone)]
-struct AgentEnvironment {
-    /// The name of the agent image in the local docker image list
-    pub agent_image: String,
+struct AgentTestEnvironment {
     /// Actions which have to be done in the given order.
     pub serial_actions: Vec<AgentExpectedAction>,
     /// Actions which can be done at any time and just have to happen at least once.
@@ -92,10 +94,10 @@ struct AgentEnvironment {
     serial_action_index: usize,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct GitCmd {}
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct LLMCall {
     pub prompt: Option<String>,
     pub response: LLMResponse,
@@ -109,13 +111,13 @@ impl LLMCall {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum LLMResponse {
     Message(String),
     ToolCall(String),
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 enum AgentExpectedAction {
     File(String, Option<String>),
     GitCmd(GitCmd),
@@ -138,13 +140,26 @@ impl Task {
 }
 
 struct ServerContext {
-    pub environment: AgentEnvironment,
-    pub test_data: AgentTestRun,
+    pub environment: AgentTestEnvironment,
+    pub test_data: AgentTestFinishedRun,
+
+    pub terminate_server: bool,
+}
+
+impl http_server::ServerContext for ServerContext {
+    fn should_terminate_server(&self) -> bool {
+        self.terminate_server
+    }
+}
+impl ServerContext {
+    pub fn terminate_server(&mut self) {
+        self.terminate_server = true
+    }
 }
 
 // ==============================
 
-impl Default for AgentTestRun {
+impl Default for AgentTestFinishedRun {
     fn default() -> Self {
         Self {
             log: Vec::new(),
@@ -153,10 +168,10 @@ impl Default for AgentTestRun {
     }
 }
 
-impl AgentEnvironment {
-    pub fn new(agent_image: &str) -> Self {
+impl AgentTestEnvironment {
+    /// Construct a new agent test environment with empty task and no requirements for the agent.
+    pub fn new() -> Self {
         Self {
-            agent_image: agent_image.to_owned(),
             serial_actions: Vec::new(),
             parallel_actions: Vec::new(),
             task: Task::new(""),
@@ -165,6 +180,7 @@ impl AgentEnvironment {
         }
     }
 
+    /// Set the task the agent should do
     pub fn with_task(mut self, task: &Task) -> Self {
         self.task = task.clone();
         self
@@ -200,8 +216,8 @@ impl AgentEnvironment {
     }
 
     /// Start the docker container
-    pub fn run(mut self) -> Result<AgentEnvironmentRunner> {
-        AgentEnvironmentRunner::new(self)
+    pub fn run(mut self, agent_image: &str) -> Result<AgentTestRunner> {
+        AgentTestRunner::new(agent_image, self)
     }
 
     fn next_serial_action(&mut self) -> Option<&AgentExpectedAction> {
@@ -212,9 +228,31 @@ impl AgentEnvironment {
     fn peek_next_serial_action(&mut self) -> Option<&AgentExpectedAction> {
         self.serial_actions.get(self.serial_action_index)
     }
-    fn following_serial_actions(&mut self) -> &[AgentExpectedAction] {
-        if self.serial_action_index + 1 >= self.serial_actions.len() { return &[]; }
-        &self.serial_actions[self.serial_action_index + 1..]
+    fn following_serial_actions(&self) -> &[AgentExpectedAction] {
+        let actions = self.uncompleted_serial_actions();
+        if actions.len() > 0 { &actions[1..] } else { &[] }
+    }
+    fn uncompleted_serial_actions(&self) -> &[AgentExpectedAction] {
+        if self.serial_action_index >= self.serial_actions.len() { return &[]; }
+        &self.serial_actions[self.serial_action_index..]
+    }
+
+    fn uncompleted_parallel_actions(&self) -> &[AgentExpectedAction] {
+        &self.parallel_actions
+    }
+    /// Checks if the required parallel actions were done and deletes them from the queue if yes.
+    /// Returns `true` iff all parallel actions are run.
+    fn check_parallel_actions(&mut self) -> bool {
+        self.parallel_actions = self.parallel_actions.clone().into_iter().filter(|a| self.check_parallel_action(a)).collect();
+        self.parallel_actions.len() == 0
+    }
+    fn check_parallel_action(&self, action: &AgentExpectedAction) -> bool {
+        match action {
+            AgentExpectedAction::File(name, maybe_content) =>
+
+            // This action cannot be checked in parallel
+            _ => true
+        }
     }
 
     /// Checks if the given API request is valid.
@@ -229,6 +267,10 @@ impl AgentEnvironment {
         self.following_serial_actions().iter().find(|&action| request.request_target == Self::action_to_endpoint(action)).is_none()
     }
 
+    fn check_api_request_failure_mode(&mut self, request: HttpRequest, failure: TestFailure) -> Option<TestFailure> {
+        if self.check_api_request(request) { None } else { Some(failure) }
+    }
+
     /// Returns the API endpoint of a given action
     fn action_to_endpoint(action: &AgentExpectedAction) -> String {
         match action {
@@ -240,9 +282,9 @@ impl AgentEnvironment {
     }
 }
 
-struct AgentEnvironmentRunner {
-    environment: AgentEnvironment,
-    test_data: AgentTestRun,
+struct AgentTestRunner {
+    environment: AgentTestEnvironment,
+    test_data: AgentTestFinishedRun,
     tokio_runtime: tokio::runtime::Runtime,
 
     server_process: tokio::task::JoinHandle<http_server::Result<ServerContext>>,
@@ -251,12 +293,14 @@ struct AgentEnvironmentRunner {
     container_id: String,
 }
 
-impl AgentEnvironmentRunner {
-    pub fn new(agent_environment: AgentEnvironment) -> Result<Self> {
+impl AgentTestRunner {
+    /// Construct a runner from an `AgentEnvironment`.
+    /// This starts the docker container with the webserver for the API hooks
+    pub fn new(agent_image: &str, agent_environment: AgentTestEnvironment) -> Result<Self> {
         let tokio_runtime = tokio::runtime::Runtime::new().unwrap();
 
         let server_process = tokio_runtime.block_on(async { Self::setup_api_endpoints(agent_environment.clone()) })?;
-        let (docker, container_id, logging_process) = tokio_runtime.block_on(async { Self::setup_docker(&agent_environment.agent_image).await })?;
+        let (docker, container_id, logging_process) = tokio_runtime.block_on(async { Self::setup_docker(agent_image).await })?;
 
         let runner = Self {
             test_data: Default::default(),
@@ -269,7 +313,9 @@ impl AgentEnvironmentRunner {
         Ok(runner)
     }
 
-    pub fn join(mut self) -> Result<AgentFinishedRunner> {
+    /// Block while waiting for the completion of the agent container and all processes around it, like the webserver.
+    /// Returns the results of the test run.
+    pub fn join(mut self) -> Result<AgentTestFinishedRunner> {
         let runtime = tokio::runtime::Runtime::new().unwrap();
 
         let (server_test_data, own_test_data) = runtime.block_on(async {
@@ -282,25 +328,38 @@ impl AgentEnvironmentRunner {
             let server_context = self.server_process.await??;
             self.container_logging_process.await?;
 
+            let uncompleted_serial_actions = server_context.environment.uncompleted_serial_actions();
+            if uncompleted_serial_actions.len() > 0 {
+                self.test_data.failure = Some(TestFailure::ActionsMissing(uncompleted_serial_actions.to_owned()))
+            }
+
+            let uncompleted_parallel_actions = server_context.environment.uncompleted_parallel_actions();
+            if uncompleted_parallel_actions.len() > 0 {
+                self.test_data.failure = Self::merge_test_failure(self.test_data.failure, TestFailure::ActionsMissing(uncompleted_parallel_actions.to_owned()))
+            }
+
             self.tokio_runtime.shutdown_background();
 
-            Ok::<(AgentTestRun, AgentTestRun), Box<dyn std::error::Error>>((server_context.test_data, self.test_data))
+            Ok::<(AgentTestFinishedRun, AgentTestFinishedRun), Box<dyn std::error::Error>>((server_context.test_data, self.test_data))
         })?;
-        Ok(AgentFinishedRunner {
+        Ok(AgentTestFinishedRunner {
             test_data: Self::merge_test_data(server_test_data, own_test_data),
         })
     }
 
-    fn merge_test_data(a: AgentTestRun, mut b: AgentTestRun) -> AgentTestRun {
+    /// Merge two instances of the data accumulated over an agent test run
+    fn merge_test_data(a: AgentTestFinishedRun, mut b: AgentTestFinishedRun) -> AgentTestFinishedRun {
         let mut log = a.log;
         log.append(&mut b.log);
-        AgentTestRun {
+        AgentTestFinishedRun {
             log,
             failure: Self::merge_test_failure(a.failure, b.failure),
         }
     }
 
+    /// Merge two instances of test results from an agent test run
     fn merge_test_failure(a: Option<TestFailure>, b: Option<TestFailure>) -> Option<TestFailure> {
+        // just for fun as oneliner: vec![a, b].into_iter().filter(|t| t.is_some()).reduce(|l, r| Some(TestFailure::Multiple(Box::new(l.unwrap()), Box::new(r.unwrap())))).unwrap_or(None)
         match (a, b) {
             (None, None) => None,
             (Some(f), None) => Some(f),
@@ -309,6 +368,9 @@ impl AgentEnvironmentRunner {
         }
     }
 
+    /// Setup docker and start the agent container.
+    /// Return the docker instance, the container id and the logging process.
+    /// This has to be called from a tokio runtime as a new tokio task is spawned.
     async fn setup_docker(agent_image: &str) -> Result<(Docker, String, tokio::task::JoinHandle<()>)> {
         let docker = get_docker()?;
         let container_id = start_agent_container(&docker, agent_image).await?;
@@ -317,28 +379,50 @@ impl AgentEnvironmentRunner {
         Ok((docker, container_id, logging_process))
     }
 
-    fn setup_api_endpoints(agent_environment: AgentEnvironment) -> Result<tokio::task::JoinHandle<http_server::Result<ServerContext>>> {
+    /// Sets up the endpoints the agent can request, e.g. for the Task API or the LLM requests.
+    /// Returns a handle to the server process, which, on completion, returns the server context.
+    /// This has to be called from a tokio runtime as a new tokio task is spawned.
+    fn setup_api_endpoints(agent_environment: AgentTestEnvironment) -> Result<tokio::task::JoinHandle<http_server::Result<ServerContext>>> {
         let addr = SocketAddr::from(([0,0,0,0], 3000));
         let mut server =
             Server::new(addr, ServerContext {
                 environment: agent_environment,
                 test_data: Default::default(),
+                terminate_server: false,
             })
                 // Task API
-                .with_handle(APIEndpoint::TaskSuccess.into(), |request, context| {
+
+                // SUCCESS
+                .with_endpoint(APIEndpoint::TaskSuccess.into(), |request, context| {
                     println!("Task succeeded: {}", request.body);
-                    context.environment.check_api_request(request);
-                    HttpResponse::ok().terminate()
+                    context.test_data.failure = context.environment.check_api_request_failure_mode(request, TestFailure::CallToSuccess);
+                    context.terminate_server();
+                    HttpResponse::ok()
                 })?
-                .with_handle(APIEndpoint::TaskFailure.into(), |request, context| {
+
+                // FAILURE
+                .with_endpoint(APIEndpoint::TaskFailure.into(), |request, context| {
                     println!("Task failed: {}", request.body);
-                    HttpResponse::ok().terminate()
+                    context.test_data.failure = context.environment.check_api_request_failure_mode(request, TestFailure::CallToFailure);
+                    context.terminate_server();
+                    HttpResponse::ok()
                 })?
-                .with_handle(APIEndpoint::TaskInfo.into(), |request, context| {
+
+                // TASK INFO
+                .with_endpoint(APIEndpoint::TaskInfo.into(), |request, context| {
                     println!("Task requested");
+                    context.test_data.failure = context.environment.check_api_request_failure_mode(request, TestFailure::CallToTaskInfo);
+                    if context.test_data.failure.is_some() { context.terminate_server() }
+
                     HttpResponse::ok().json(&context.environment.task.clone())
                 })?
-                .with_handle(APIEndpoint::LLMRequest.into(), |request, context| {
+
+                // LLM
+                .with_endpoint(APIEndpoint::LLMRequest.into(), |request, context| {
+                    let llm_prompt = "".to_owned();
+                    context.test_data.failure = context.environment.check_api_request_failure_mode(request, TestFailure::CallToLLM(llm_prompt.clone()));
+                    if context.test_data.failure.is_some() { context.terminate_server() }
+
                     HttpResponse::ok().json(&serde_json::json!({
                         "choices": [
                             {
@@ -392,11 +476,11 @@ impl AgentEnvironmentRunner {
 
 }
 
-struct AgentFinishedRunner {
-    test_data: AgentTestRun,
+struct AgentTestFinishedRunner {
+    test_data: AgentTestFinishedRun,
 }
 
-impl AgentFinishedRunner {
+impl AgentTestFinishedRunner {
     pub fn test_failure(&self) -> Option<TestFailure> {
         self.test_data.failure.clone()
     }
@@ -506,12 +590,13 @@ async fn get_files(docker: &Docker, container_id: &str) -> Result<Vec<String>> {
 }
 
 fn main() {
-    let test_env = AgentEnvironment::new("agent-42")
+    let test_env = AgentTestEnvironment::new()
         .with_task(&Task::new("Do nothing"))
+        .expect_llm_call(&LLMResponse::Message("Do nothing".to_owned()), None)
         .expect_llm_call(&LLMResponse::Message("Do nothing".to_owned()), None)
         .expect_failure(None)
         ;
-    match test_env.run() {
+    match test_env.run("agent-42") {
         Ok(mut runner) => {
             match runner.join() {
                 Ok(runner) => {

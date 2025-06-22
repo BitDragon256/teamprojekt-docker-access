@@ -47,7 +47,11 @@ enum RequestType {
 
 // ==============================
 
-pub struct Server<T = ()> {
+pub(crate) trait ServerContext {
+    fn should_terminate_server(&self) -> bool;
+}
+
+pub struct Server<T: ServerContext> {
     addr: SocketAddr,
 
     // handles: HashMap<String, Box<dyn Fn(HttpRequest) -> HttpResponse + Send>>,
@@ -79,8 +83,6 @@ pub struct HttpResponse {
     pub headers: HashMap<String, String>,
     pub status_code: StatusCode,
     pub body: String,
-
-    pub terminate_server: bool,
 }
 
 impl HttpResponse {
@@ -89,7 +91,6 @@ impl HttpResponse {
             headers: HashMap::new(),
             status_code: 0,
             body: String::new(),
-            terminate_server: false,
         }
     }
     pub fn not_found() -> Self {
@@ -110,10 +111,6 @@ impl HttpResponse {
     pub fn json<T: Serialize>(mut self, content: &T) -> Self {
         self.body = serde_json::to_string(content).unwrap(); // this should not panic
         self.headers.insert("Content-Type".to_owned(), "application/json".to_owned());
-        self
-    }
-    pub fn terminate(mut self) -> Self {
-        self.terminate_server = true;
         self
     }
 }
@@ -219,7 +216,7 @@ fn write_http_response(stream: &mut TcpStream, response: HttpResponse) -> Result
     Ok(())
 }
 
-impl<T> Server<T> {
+impl<T: ServerContext> Server<T> {
     pub(crate) fn new(addr: SocketAddr, context: T) -> Self {
         Self {
             addr,
@@ -230,10 +227,9 @@ impl<T> Server<T> {
     }
 
     /// Set handle for a specific endpoint.
-    // pub fn with_handle(mut self, endpoint: &str, handle: impl Fn(HttpRequest) -> HttpResponse + Send) -> Self {
-    pub fn with_handle(mut self, endpoint: &str, handle: fn(HttpRequest, &mut T) -> HttpResponse) -> Result<Self> {
+    pub fn with_endpoint(mut self, target: &str, callback: fn(HttpRequest, &mut T) -> HttpResponse) -> Result<Self> {
         // self.handles.insert(endpoint.to_owned(), Box::new(handle));
-        self.handles.insert(format_relative_url(endpoint).ok_or(Error::InvalidEndpoint(endpoint.to_owned()))?, handle);
+        self.handles.insert(format_relative_url(target).ok_or(Error::InvalidEndpoint(target.to_owned()))?, callback);
         Ok(self)
     }
 
@@ -258,11 +254,10 @@ impl<T> Server<T> {
                         .get(&request.request_target)
                         .map(|handle| handle(request.clone(), &mut self.context))
                         .unwrap_or_else(|| (self.else_handle)(request));
-                    let terminate = response.terminate_server;
 
                     write_http_response(&mut stream, response)?;
 
-                    if terminate { break; }
+                    if self.context.should_terminate_server() { break; }
                 }
                 Err(err) => return Err(Error::ConnectionFailed(format!("{}", err)))
             }
