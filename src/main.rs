@@ -2,6 +2,8 @@
 
 mod http_server;
 
+use std::io::Read;
+use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use std::net::SocketAddr;
 use bollard::Docker;
@@ -237,24 +239,6 @@ impl AgentTestEnvironment {
         &self.serial_actions[self.serial_action_index..]
     }
 
-    fn uncompleted_parallel_actions(&self) -> &[AgentExpectedAction] {
-        &self.parallel_actions
-    }
-    /// Checks if the required parallel actions were done and deletes them from the queue if yes.
-    /// Returns `true` iff all parallel actions are run.
-    fn check_parallel_actions(&mut self) -> bool {
-        self.parallel_actions = self.parallel_actions.clone().into_iter().filter(|a| self.check_parallel_action(a)).collect();
-        self.parallel_actions.len() == 0
-    }
-    fn check_parallel_action(&self, action: &AgentExpectedAction) -> bool {
-        match action {
-            AgentExpectedAction::File(name, maybe_content) =>
-
-            // This action cannot be checked in parallel
-            _ => true
-        }
-    }
-
     /// Checks if the given API request is valid.
     /// The request is valid if it is either next in the queue of serial actions or not at all in the queue.
     fn check_api_request(&mut self, request: HttpRequest) -> bool {
@@ -333,9 +317,9 @@ impl AgentTestRunner {
                 self.test_data.failure = Some(TestFailure::ActionsMissing(uncompleted_serial_actions.to_owned()))
             }
 
-            let uncompleted_parallel_actions = server_context.environment.uncompleted_parallel_actions();
+            let uncompleted_parallel_actions = self.uncompleted_parallel_actions(self.environment.parallel_actions);
             if uncompleted_parallel_actions.len() > 0 {
-                self.test_data.failure = Self::merge_test_failure(self.test_data.failure, TestFailure::ActionsMissing(uncompleted_parallel_actions.to_owned()))
+                self.test_data.failure = Self::merge_test_failure(self.test_data.failure, Some(TestFailure::ActionsMissing(uncompleted_parallel_actions.to_owned())))
             }
 
             self.tokio_runtime.shutdown_background();
@@ -345,6 +329,25 @@ impl AgentTestRunner {
         Ok(AgentTestFinishedRunner {
             test_data: Self::merge_test_data(server_test_data, own_test_data),
         })
+    }
+
+    /// Checks which of the given parallel actions were done and deletes them from the queue if yes.
+    /// Returns the remaining uncompleted actions
+    async fn uncompleted_parallel_actions(&self, actions: Vec<AgentExpectedAction>) -> Result<Vec<AgentExpectedAction>> {
+        let action_filter = actions.clone().into_iter().map(async |a| self.check_parallel_action(&a).await);
+        if let Some(err) = action_filter.clone().find(|v| v.is_err()) {
+            err
+        } else {
+            action_filter.filter(|v| v.unwrap()).collect()
+        }
+    }
+    async fn check_parallel_action(&self, action: &AgentExpectedAction) -> Result<bool> {
+        match action {
+            AgentExpectedAction::File(name, maybe_content) => get_files(&self.docker, &self.container_id).await.,
+
+            // This action cannot be checked in parallel
+            _ => true
+        }
     }
 
     /// Merge two instances of the data accumulated over an agent test run
@@ -561,9 +564,10 @@ async fn attach_outstreams(docker: &Docker, container_id: &str) -> Result<tokio:
     }))
 }
 
-/// extracts all files from the container under `container_id`
-/// currently only returns the file paths
-async fn get_files(docker: &Docker, container_id: &str) -> Result<Vec<String>> {
+/// Extracts all files from the container under `container_id`.
+/// Returns a map from the filenames to the file content.
+/// Filenames are given with path, so e.g. `dev/my_project/main.rs`
+async fn get_files(docker: &Docker, container_id: &str) -> Result<HashMap<String, String>> {
     let options = DownloadFromContainerOptions {
         path: "/app".to_string(),
     };
@@ -575,18 +579,22 @@ async fn get_files(docker: &Docker, container_id: &str) -> Result<Vec<String>> {
         archive_data.extend(chunk);
     }
 
-    let mut file_paths = Vec::new();
+    let mut files = HashMap::new();
 
     let mut archive = Archive::new(&archive_data[..]);
     for entry in archive.entries()? {
-        let entry = entry?;
-        let path = entry.path()?;
-        println!("found file: {:?}", path);
+        let mut entry = entry?;
+        let path = entry.path()?.to_str().unwrap().to_owned();
+        let mut file_contents = String::new();
+        entry.read_to_string(&mut file_contents)?;
 
-        file_paths.push(path.to_str().unwrap().to_owned())
+        println!("found file: {:?}", path);
+        println!("file content: {:?}", file_contents);
+
+        files.insert(path, file_contents);
     }
 
-    Ok(file_paths)
+    Ok(files)
 }
 
 fn main() {
