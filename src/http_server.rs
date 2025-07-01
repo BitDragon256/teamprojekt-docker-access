@@ -5,9 +5,9 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 
 #[derive(Debug)]
-pub enum Error {
+pub(crate) enum Error {
     ConnectionFailed(String),
-    IOError(String),
+    IO(String),
     InvalidRequest(String),
     InvalidRequestEndpoint(String),
     InvalidEndpoint(String),
@@ -31,7 +31,7 @@ fn format_relative_url(url: &str) -> Option<String> {
 
 impl From<std::io::Error> for Error {
     fn from(err: std::io::Error) -> Self {
-        Error::IOError(format!("{err}"))
+        Error::IO(format!("{err}"))
     }
 }
 
@@ -40,9 +40,9 @@ pub(crate) type Result<T> = std::result::Result<T, Error>;
 // ==============================
 
 #[derive(Clone)]
-enum RequestType {
-    GET,
-    POST,
+pub(crate) enum RequestType {
+    Get,
+    Post,
 }
 
 // ==============================
@@ -51,38 +51,38 @@ pub(crate) trait ServerContext {
     fn should_terminate_server(&self) -> bool;
 }
 
-pub struct Server<T: ServerContext> {
+pub(crate) struct Server<T: ServerContext> {
     addr: SocketAddr,
 
     // handles: HashMap<String, Box<dyn Fn(HttpRequest) -> HttpResponse + Send>>,
     handles: HashMap<String, fn(HttpRequest, &mut T) -> HttpResponse>,
     else_handle: fn(HttpRequest) -> HttpResponse,
-    pub context: T,
+    pub(crate) context: T,
 }
 
 #[derive(Clone)]
-pub struct HttpRequest {
+pub(crate) struct HttpRequest {
     /// Describes the meaning and desired outcome of the request, e.g. GET if the client wants a resource in return
-    pub method: RequestType,
+    pub(crate) method: RequestType,
 
     /// An absolute or relative URL describing the requested target (endpoint).
     /// Most of the time, this is in relative form (also called origin form), e.g. /api/success
-    pub request_target: String,
+    pub(crate) request_target: String,
 
     /// The HTTP version, most of the time this is `HTTP/1.1` (older ones are discontinued, the newer aren't in this format)
-    pub protocol: String,
+    pub(crate) protocol: String,
 
     /// The headers of the request containing metadata
-    pub headers: HashMap<String, String>,
+    pub(crate) headers: HashMap<String, String>,
 
     /// The actual content of the request
-    pub body: String,
+    pub(crate) body: String,
 }
 #[derive(Clone)]
-pub struct HttpResponse {
-    pub headers: HashMap<String, String>,
-    pub status_code: StatusCode,
-    pub body: String,
+pub(crate) struct HttpResponse {
+    pub(crate) headers: HashMap<String, String>,
+    pub(crate) status_code: StatusCode,
+    pub(crate) body: String,
 }
 
 impl HttpResponse {
@@ -93,22 +93,22 @@ impl HttpResponse {
             body: String::new(),
         }
     }
-    pub fn not_found() -> Self {
+    pub(crate) fn not_found() -> Self {
         let mut s = Self::new();
         s.status_code = 404;
         s
     }
-    pub fn ok() -> Self {
+    pub(crate) fn ok() -> Self {
         let mut s = Self::new();
         s.status_code = 200;
         s
     }
 
-    pub fn text(mut self, body: &str) -> Self {
+    pub(crate) fn text(mut self, body: &str) -> Self {
         self.body = body.to_owned();
         self
     }
-    pub fn json<T: Serialize>(mut self, content: &T) -> Self {
+    pub(crate) fn json<T: Serialize>(mut self, content: &T) -> Self {
         self.body = serde_json::to_string(content).unwrap(); // this should not panic
         self.headers
             .insert("Content-Type".to_owned(), "application/json".to_owned());
@@ -116,7 +116,7 @@ impl HttpResponse {
     }
 }
 
-pub type StatusCode = u32;
+pub(crate) type StatusCode = u32;
 fn format_status_code_message(status_code: StatusCode) -> String {
     match status_code {
         200 => "200 OK",
@@ -141,8 +141,8 @@ fn parse_http_request(content: &str) -> Result<HttpRequest> {
         .next()
         .ok_or(IR("Missing HTTP method".to_owned()))?
     {
-        "GET" => RequestType::GET,
-        "POST" => RequestType::POST,
+        "GET" => RequestType::Get,
+        "POST" => RequestType::Post,
         m => return Err(IR(format!("Unsupported HTTP method: {m}"))),
     };
 
@@ -190,7 +190,7 @@ fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest> {
     // TODO timeout
     // TODO buffer size
     let mut buf = [0; 1000];
-    stream.read(&mut buf)?;
+    stream.read_exact(&mut buf)?;
     let content = String::from_utf8_lossy(&buf).to_string();
     parse_http_request(&content)
 }
@@ -238,7 +238,7 @@ impl<T: ServerContext> Server<T> {
     }
 
     /// Set handle for a specific endpoint.
-    pub fn with_endpoint(
+    pub(crate) fn with_endpoint(
         mut self,
         target: &str,
         callback: fn(HttpRequest, &mut T) -> HttpResponse,
@@ -252,14 +252,14 @@ impl<T: ServerContext> Server<T> {
     }
 
     /// Set handle which is called when the endpoint is not recognized.
-    pub fn with_else_handle(mut self, handle: fn(HttpRequest) -> HttpResponse) -> Self {
+    pub(crate) fn with_else_handle(mut self, handle: fn(HttpRequest) -> HttpResponse) -> Self {
         self.else_handle = handle;
         self
     }
 
     /// Starts the server, consuming it. It runs until a response is sent containing the termination flag.
     /// The context is returned on shutdown.
-    pub fn run(mut self) -> Result<T> {
+    pub(crate) fn run(mut self) -> Result<T> {
         let listener = TcpListener::bind(self.addr)?;
 
         for stream in listener.incoming() {

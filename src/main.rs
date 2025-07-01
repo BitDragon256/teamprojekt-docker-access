@@ -4,7 +4,7 @@ mod http_server;
 
 use crate::http_server::{HttpRequest, HttpResponse, Server};
 use bollard::Docker;
-use bollard::container::{LogOutput, WaitContainerOptions};
+use bollard::container::{LogOutput};
 use bollard::models::{ContainerCreateBody, HostConfig};
 use bollard::query_parameters::CreateContainerOptions;
 use bollard::query_parameters::{
@@ -86,21 +86,21 @@ impl Display for TestFailure {
 #[derive(Default)]
 struct AgentTestFinishedRun {
     /// All registered actions of the agent
-    pub log: Vec<TestLog>,
+    pub(crate) log: Vec<TestLog>,
 
     /// The Reason of Failure, if the Test failed
-    pub failure: Option<TestFailure>,
+    pub(crate) failure: Option<TestFailure>,
 }
 
 #[derive(Clone)]
 struct AgentTestEnvironment {
     /// Actions which have to be done in the given order.
-    pub serial_actions: Vec<AgentExpectedAction>,
+    pub(crate) serial_actions: Vec<AgentExpectedAction>,
     /// Actions which can be done at any time and just have to happen at least once.
-    pub parallel_actions: Vec<AgentExpectedAction>,
+    pub(crate) parallel_actions: Vec<AgentExpectedAction>,
 
     /// The task which is provided to the agent.
-    pub task: Task,
+    pub(crate) task: Task,
 
     /// The current index of the serial actions
     serial_action_index: usize,
@@ -111,8 +111,8 @@ struct GitCmd {}
 
 #[derive(Clone, Debug)]
 struct LLMCall {
-    pub prompt: Option<String>,
-    pub response: LLMResponse,
+    pub(crate) prompt: Option<String>,
+    pub(crate) response: LLMResponse,
 }
 impl LLMCall {
     fn new(response: LLMResponse, prompt: Option<&str>) -> Self {
@@ -124,7 +124,7 @@ impl LLMCall {
 }
 
 #[derive(Clone, Debug)]
-pub enum LLMResponse {
+pub(crate) enum LLMResponse {
     Message(String),
     ToolCall(String),
 }
@@ -139,12 +139,12 @@ enum AgentExpectedAction {
 }
 
 #[derive(Clone, Serialize)]
-pub struct Task {
-    pub description: String,
+pub(crate) struct Task {
+    pub(crate) description: String,
 }
 
 impl Task {
-    pub fn new(description: &str) -> Self {
+    pub(crate) fn new(description: &str) -> Self {
         Self {
             description: description.to_owned(),
         }
@@ -152,10 +152,10 @@ impl Task {
 }
 
 struct ServerContext {
-    pub environment: AgentTestEnvironment,
-    pub test_data: AgentTestFinishedRun,
+    pub(crate) environment: AgentTestEnvironment,
+    pub(crate) test_data: AgentTestFinishedRun,
 
-    pub terminate_server: bool,
+    pub(crate) terminate_server: bool,
 }
 
 impl http_server::ServerContext for ServerContext {
@@ -164,7 +164,7 @@ impl http_server::ServerContext for ServerContext {
     }
 }
 impl ServerContext {
-    pub fn terminate_server(&mut self) {
+    pub(crate) fn terminate_server(&mut self) {
         self.terminate_server = true
     }
 }
@@ -174,7 +174,7 @@ impl ServerContext {
 
 impl AgentTestEnvironment {
     /// Construct a new agent test environment with empty task and no requirements for the agent.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             serial_actions: Vec::new(),
             parallel_actions: Vec::new(),
@@ -185,14 +185,14 @@ impl AgentTestEnvironment {
     }
 
     /// Set the task the agent should do
-    pub fn with_task(mut self, task: &Task) -> Self {
+    pub(crate) fn with_task(mut self, task: &Task) -> Self {
         self.task = task.clone();
         self
     }
 
     /// Expect a llm prompt and send back the given `response`.
     /// If `exact_prompt` is not `None`, the received llm prompt has to correspond to it.
-    pub fn expect_llm_call(mut self, response: &LLMResponse, exact_prompt: Option<&str>) -> Self {
+    pub(crate) fn expect_llm_call(mut self, response: &LLMResponse, exact_prompt: Option<&str>) -> Self {
         self.serial_actions
             .push(AgentExpectedAction::LLMCall(LLMCall::new(
                 response.clone(),
@@ -202,7 +202,7 @@ impl AgentTestEnvironment {
     }
 
     /// Expect a termination request of the agent indicating success
-    pub fn expect_success(mut self, success_report: Option<&str>) -> Self {
+    pub(crate) fn expect_success(mut self, success_report: Option<&str>) -> Self {
         self.serial_actions.push(AgentExpectedAction::TaskSuccess(
             success_report.map(|s| s.to_owned()),
         ));
@@ -211,7 +211,7 @@ impl AgentTestEnvironment {
 
     /// Expect a termination request of the agent indicating failure with a corresponding failure report.
     /// If `failure_report` is not `None`, the received failure report has to correspond to it.
-    pub fn expect_failure(mut self, failure_report: Option<&str>) -> Self {
+    pub(crate) fn expect_failure(mut self, failure_report: Option<&str>) -> Self {
         self.serial_actions.push(AgentExpectedAction::TaskFailure(
             failure_report.map(|s| s.to_owned()),
         ));
@@ -222,7 +222,7 @@ impl AgentTestEnvironment {
     /// If the file is under a specific path, this path has to be included in the file name.
     /// An optional file content can be specified with `content` (is only tested if `content` is not `None`).
     /// The check is done at no specific time.
-    pub fn expect_file(mut self, file_name: &str, content: Option<&str>) -> Self {
+    pub(crate) fn expect_file(mut self, file_name: &str, content: Option<&str>) -> Self {
         self.parallel_actions.push(AgentExpectedAction::File(
             file_name.to_owned(),
             content.map(|s| s.to_owned()),
@@ -231,7 +231,7 @@ impl AgentTestEnvironment {
     }
 
     /// Start the docker container
-    pub fn run(self, agent_image: &str) -> Result<AgentTestRunner> {
+    pub(crate) fn run(self, agent_image: &str) -> Result<AgentTestRunner> {
         AgentTestRunner::new(agent_image, self)
     }
 
@@ -319,7 +319,7 @@ struct AgentTestRunner {
 impl AgentTestRunner {
     /// Construct a runner from an `AgentEnvironment`.
     /// This starts the docker container with the webserver for the API hooks
-    pub fn new(agent_image: &str, agent_environment: AgentTestEnvironment) -> Result<Self> {
+    pub(crate) fn new(agent_image: &str, agent_environment: AgentTestEnvironment) -> Result<Self> {
         let tokio_runtime = tokio::runtime::Runtime::new().unwrap();
 
         let server_process = tokio_runtime
@@ -341,7 +341,7 @@ impl AgentTestRunner {
 
     /// Block while waiting for the completion of the agent container and all processes around it, like the webserver.
     /// Returns the results of the test run.
-    pub fn join(mut self) -> Result<AgentTestFinishedRunner> {
+    pub(crate) fn join(mut self) -> Result<AgentTestFinishedRunner> {
         let runtime = tokio::runtime::Runtime::new().unwrap();
 
         let (server_test_data, own_test_data) = runtime.block_on(async {
@@ -560,7 +560,7 @@ impl AgentTestRunner {
     async fn join_agent_container(&self) -> Option<TestFailure> {
         let mut wait_stream = self
             .docker
-            .wait_container(&self.container_id, None::<WaitContainerOptions<String>>);
+            .wait_container(&self.container_id, None::<bollard::query_parameters::WaitContainerOptions>);
 
         if let Some(Ok(log)) = wait_stream.next().await {
             if log.status_code > 0 {
@@ -583,10 +583,10 @@ struct AgentTestFinishedRunner {
 }
 
 impl AgentTestFinishedRunner {
-    pub fn test_failure(&self) -> Option<TestFailure> {
+    pub(crate) fn test_failure(&self) -> Option<TestFailure> {
         self.test_data.failure.clone()
     }
-    pub fn test_logs(&self) -> Vec<TestLog> {
+    pub(crate) fn test_logs(&self) -> Vec<TestLog> {
         self.test_data.log.clone()
     }
 }
