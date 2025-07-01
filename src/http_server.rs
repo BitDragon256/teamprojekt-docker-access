@@ -15,7 +15,7 @@ pub enum Error {
 
 impl Display for Error {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "HTTP Server Error: {:?}", self)
+        write!(f, "HTTP Server Error: {self:?}")
     }
 }
 
@@ -23,15 +23,15 @@ impl std::error::Error for Error {}
 
 fn format_relative_url(url: &str) -> Option<String> {
     if !url.ends_with("/") {
-        Some(format!("{}/", url))
+        Some(format!("{url}/"))
     } else {
-        Some(format!("{}", url))
+        Some(url.to_string())
     }
 }
 
 impl From<std::io::Error> for Error {
     fn from(err: std::io::Error) -> Self {
-        Error::IOError(format!("{}", err))
+        Error::IOError(format!("{err}"))
     }
 }
 
@@ -143,7 +143,7 @@ fn parse_http_request(content: &str) -> Result<HttpRequest> {
     {
         "GET" => RequestType::GET,
         "POST" => RequestType::POST,
-        m => return Err(IR(format!("Unsupported HTTP method: {}", m))),
+        m => return Err(IR(format!("Unsupported HTTP method: {m}"))),
     };
 
     let request_target = start_line_parts
@@ -207,7 +207,7 @@ fn format_http_response(response: HttpResponse) -> Result<String> {
 
     // headers
     for (key, value) in &response.headers {
-        formatted_response.push_str(&format!("{}: {}\r\n", key, value));
+        formatted_response.push_str(&format!("{key}: {value}\r\n"));
     }
 
     if !response.headers.contains_key("Content-Length") {
@@ -282,7 +282,7 @@ impl<T: ServerContext> Server<T> {
                         break;
                     }
                 }
-                Err(err) => return Err(Error::ConnectionFailed(format!("{}", err))),
+                Err(err) => return Err(Error::ConnectionFailed(format!("{err}"))),
             }
         }
 

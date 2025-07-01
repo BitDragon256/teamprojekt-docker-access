@@ -4,7 +4,7 @@ mod http_server;
 
 use crate::http_server::{HttpRequest, HttpResponse, Server};
 use bollard::Docker;
-use bollard::container::{AttachContainerOptions, Config, LogOutput, WaitContainerOptions};
+use bollard::container::{LogOutput, WaitContainerOptions};
 use bollard::models::{ContainerCreateBody, HostConfig};
 use bollard::query_parameters::CreateContainerOptions;
 use bollard::query_parameters::{
@@ -28,9 +28,9 @@ enum APIEndpoint {
     LLMRequest,
 }
 
-impl Into<&str> for APIEndpoint {
-    fn into(self) -> &'static str {
-        match self {
+impl From<APIEndpoint> for &str {
+    fn from(val: APIEndpoint) -> Self {
+        match val {
             APIEndpoint::TaskSuccess => "/api/agent/task/complete",
             APIEndpoint::TaskFailure => "/api/agent/task/fail",
             APIEndpoint::TaskInfo => "/api/agent/task",
@@ -68,13 +68,12 @@ impl Display for TestFailure {
             TestFailure::CallToSuccess => write!(f, "Unexpected call to the success endpoint"),
             TestFailure::CallToTaskInfo => write!(f, "Unexpected call to the Task API"),
             TestFailure::CallToLLM(prompt) => {
-                write!(f, "Unexpected LLM call with prompt: {}", prompt)
+                write!(f, "Unexpected LLM call with prompt: {prompt}")
             }
-            TestFailure::AgentCrashed(err) => write!(f, "The agent crashed with error: {}", err),
+            TestFailure::AgentCrashed(err) => write!(f, "The agent crashed with error: {err}"),
             TestFailure::ActionsMissing(actions) => write!(
                 f,
-                "There are actions missing, but the agent already stopped: {:?}",
-                actions
+                "There are actions missing, but the agent already stopped: {actions:?}"
             ),
             TestFailure::Multiple(a, b) => {
                 write!(f, "Multiple failure reasons:\n    {}\n    {}", *a, *b)
@@ -84,6 +83,7 @@ impl Display for TestFailure {
 }
 
 #[derive(Clone)]
+#[derive(Default)]
 struct AgentTestFinishedRun {
     /// All registered actions of the agent
     pub log: Vec<TestLog>,
@@ -171,14 +171,6 @@ impl ServerContext {
 
 // ==============================
 
-impl Default for AgentTestFinishedRun {
-    fn default() -> Self {
-        Self {
-            log: Vec::new(),
-            failure: None,
-        }
-    }
-}
 
 impl AgentTestEnvironment {
     /// Construct a new agent test environment with empty task and no requirements for the agent.
@@ -239,7 +231,7 @@ impl AgentTestEnvironment {
     }
 
     /// Start the docker container
-    pub fn run(mut self, agent_image: &str) -> Result<AgentTestRunner> {
+    pub fn run(self, agent_image: &str) -> Result<AgentTestRunner> {
         AgentTestRunner::new(agent_image, self)
     }
 
@@ -253,7 +245,7 @@ impl AgentTestEnvironment {
     }
     fn following_serial_actions(&self) -> &[AgentExpectedAction] {
         let actions = self.uncompleted_serial_actions();
-        if actions.len() > 0 {
+        if !actions.is_empty() {
             &actions[1..]
         } else {
             &[]
@@ -275,10 +267,8 @@ impl AgentTestEnvironment {
                 return true;
             }
         }
-        self.following_serial_actions()
-            .iter()
-            .find(|&action| request.request_target == Self::action_to_endpoint(action))
-            .is_none()
+        !self.following_serial_actions()
+            .iter().any(|action| request.request_target == Self::action_to_endpoint(action))
     }
 
     fn action_matches_failure_mode(action: &AgentExpectedAction, failure: &TestFailure) -> bool {
@@ -359,7 +349,7 @@ impl AgentTestRunner {
             let parallel_actions = self.environment.parallel_actions.clone();
             let uncompleted_parallel_actions =
                 self.uncompleted_parallel_actions(parallel_actions).await?;
-            if uncompleted_parallel_actions.len() > 0 {
+            if !uncompleted_parallel_actions.is_empty() {
                 self.test_data.failure = Self::merge_test_failure(
                     self.test_data.failure,
                     Some(TestFailure::ActionsMissing(
@@ -384,7 +374,7 @@ impl AgentTestRunner {
             // check for missing serial actions
             let uncompleted_serial_actions =
                 server_context.environment.uncompleted_serial_actions();
-            if uncompleted_serial_actions.len() > 0 {
+            if !uncompleted_serial_actions.is_empty() {
                 self.test_data.failure = Self::merge_test_failure(
                     self.test_data.failure,
                     Some(TestFailure::ActionsMissing(
@@ -488,7 +478,7 @@ impl AgentTestRunner {
         agent_environment: AgentTestEnvironment,
     ) -> Result<tokio::task::JoinHandle<http_server::Result<ServerContext>>> {
         let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
-        let mut server = Server::new(
+        let server = Server::new(
             addr,
             ServerContext {
                 environment: agent_environment,
@@ -638,7 +628,7 @@ async fn start_agent_container(docker: &Docker, image_name: &str) -> Result<Stri
         .start_container(&container_id, None::<StartContainerOptions>)
         .await?;
 
-    println!("started agent container with id {}", container_id);
+    println!("started agent container with id {container_id}");
 
     Ok(container_id)
 }
@@ -655,7 +645,7 @@ async fn attach_outstreams(
         .build();
 
     let mut stream = docker
-        .attach_container(&container_id, Some(attach_options))
+        .attach_container(container_id, Some(attach_options))
         .await?;
 
     Ok(tokio::spawn(async move {
@@ -670,7 +660,7 @@ async fn attach_outstreams(
                     eprintln!("STDERR: {}", err.strip_suffix("\n").unwrap_or(&err));
                 }
                 Ok(_) => {}
-                Err(e) => eprintln!("Error: {}", e),
+                Err(e) => eprintln!("Error: {e}"),
             }
         }
     }))
@@ -700,8 +690,8 @@ async fn get_files(docker: &Docker, container_id: &str) -> Result<HashMap<String
         let mut file_contents = String::new();
         entry.read_to_string(&mut file_contents)?;
 
-        println!("found file: {:?}", path);
-        println!("file content: {:?}", file_contents);
+        println!("found file: {path:?}");
+        println!("file content: {file_contents:?}");
 
         files.insert(path, file_contents);
     }
@@ -717,23 +707,21 @@ fn main() {
         .expect_file("test.txt", None)
         .expect_failure(None);
     match test_env.run("agent-42") {
-        Ok(mut runner) => match runner.join() {
+        Ok(runner) => match runner.join() {
             Ok(runner) => {
                 println!("Test Result:");
                 match runner.test_failure() {
                     None => println!("Success!"),
-                    Some(err) => println!("Failure with reason: {}", err),
+                    Some(err) => println!("Failure with reason: {err}"),
                 }
             }
             Err(err) => println!(
-                "An unrecoverable error occurred while stopping the agent: {}",
-                err
+                "An unrecoverable error occurred while stopping the agent: {err}"
             ),
         },
         Err(err) => {
             println!(
-                "Could not setup the agent runner due to an unrecoverable error: {}",
-                err
+                "Could not setup the agent runner due to an unrecoverable error: {err}"
             );
         }
     }
