@@ -243,7 +243,7 @@ impl AgentTestEnvironment {
     /// The request is valid if it is either next in the queue of serial actions or not at all in the queue.
     fn check_api_request(&mut self, request: HttpRequest, failure: &TestFailure) -> bool {
         if let Some(action) = self.peek_next_serial_action() {
-            if request.request_target == Self::action_to_endpoint(action) {
+            if Self::action_matches_failure_mode(action, failure) {
                 self.next_serial_action();
                 return true
             }
@@ -251,11 +251,11 @@ impl AgentTestEnvironment {
         self.following_serial_actions().iter().find(|&action| request.request_target == Self::action_to_endpoint(action)).is_none()
     }
 
-    fn check_failure_mode(action: &AgentExpectedAction, failure: &TestFailure) -> bool {
+    fn action_matches_failure_mode(action: &AgentExpectedAction, failure: &TestFailure) -> bool {
         match action {
-            AgentExpectedAction::LLMCall(_) => failure..is_ok(),
-            AgentExpectedAction::TaskSuccess(_) => {}
-            AgentExpectedAction::TaskFailure(_) => {}
+            AgentExpectedAction::LLMCall(_) => matches!(failure, TestFailure::CallToLLM(_)),
+            AgentExpectedAction::TaskSuccess(_) => matches!(failure, TestFailure::CallToSuccess),
+            AgentExpectedAction::TaskFailure(_) => matches!(failure, TestFailure::CallToFailure),
 
             _ => true
         }
