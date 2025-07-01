@@ -7,9 +7,9 @@ use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use std::net::SocketAddr;
 use bollard::Docker;
-use bollard::container::{AttachContainerOptions, Config, DownloadFromContainerOptions, LogOutput, WaitContainerOptions};
-use bollard::query_parameters::{StartContainerOptions};
-use bollard::models::HostConfig;
+use bollard::container::{AttachContainerOptions, Config, LogOutput, WaitContainerOptions};
+use bollard::query_parameters::{AttachContainerOptionsBuilder, DownloadFromContainerOptionsBuilder, StartContainerOptions};
+use bollard::models::{ContainerCreateBody, HostConfig};
 use bollard::query_parameters::CreateContainerOptions;
 use futures_util::StreamExt;
 use serde::Serialize;
@@ -48,7 +48,7 @@ enum TestLog {
     CouldNotStopAgent,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 enum TestFailure {
     CallToFailure,
     CallToSuccess,
@@ -241,7 +241,7 @@ impl AgentTestEnvironment {
 
     /// Checks if the given API request is valid.
     /// The request is valid if it is either next in the queue of serial actions or not at all in the queue.
-    fn check_api_request(&mut self, request: HttpRequest) -> bool {
+    fn check_api_request(&mut self, request: HttpRequest, failure: &TestFailure) -> bool {
         if let Some(action) = self.peek_next_serial_action() {
             if request.request_target == Self::action_to_endpoint(action) {
                 self.next_serial_action();
@@ -251,8 +251,18 @@ impl AgentTestEnvironment {
         self.following_serial_actions().iter().find(|&action| request.request_target == Self::action_to_endpoint(action)).is_none()
     }
 
+    fn check_failure_mode(action: &AgentExpectedAction, failure: &TestFailure) -> bool {
+        match action {
+            AgentExpectedAction::LLMCall(_) => failure..is_ok(),
+            AgentExpectedAction::TaskSuccess(_) => {}
+            AgentExpectedAction::TaskFailure(_) => {}
+
+            _ => true
+        }
+    }
+
     fn check_api_request_failure_mode(&mut self, request: HttpRequest, failure: TestFailure) -> Option<TestFailure> {
-        if self.check_api_request(request) { None } else { Some(failure) }
+        if self.check_api_request(request, &failure) { None } else { Some(failure) }
     }
 
     /// Returns the API endpoint of a given action
@@ -303,26 +313,30 @@ impl AgentTestRunner {
         let runtime = tokio::runtime::Runtime::new().unwrap();
 
         let (server_test_data, own_test_data) = runtime.block_on(async {
+            // check for missing parallel actions
+            let parallel_actions = self.environment.parallel_actions.clone();
+            let uncompleted_parallel_actions = self.uncompleted_parallel_actions(parallel_actions).await?;
+            if uncompleted_parallel_actions.len() > 0 {
+                self.test_data.failure = Self::merge_test_failure(self.test_data.failure, Some(TestFailure::ActionsMissing(uncompleted_parallel_actions.to_owned())))
+            }
+
+            // cleanup
             let agent_stop_error = self.join_agent_container().await;
             if let Some(err) = agent_stop_error {
-                self.test_data.failure = Some(err.clone());
+                self.test_data.failure = Self::merge_test_failure(self.test_data.failure, Some(err.clone()));
                 self.test_data.log.push(TestLog::CouldNotStopAgent)
             }
 
             let server_context = self.server_process.await??;
             self.container_logging_process.await?;
 
+            self.tokio_runtime.shutdown_background();
+
+            // check for missing serial actions
             let uncompleted_serial_actions = server_context.environment.uncompleted_serial_actions();
             if uncompleted_serial_actions.len() > 0 {
-                self.test_data.failure = Some(TestFailure::ActionsMissing(uncompleted_serial_actions.to_owned()))
+                self.test_data.failure = Self::merge_test_failure(self.test_data.failure, Some(TestFailure::ActionsMissing(uncompleted_serial_actions.to_owned())))
             }
-
-            let uncompleted_parallel_actions = self.uncompleted_parallel_actions(self.environment.parallel_actions);
-            if uncompleted_parallel_actions.len() > 0 {
-                self.test_data.failure = Self::merge_test_failure(self.test_data.failure, Some(TestFailure::ActionsMissing(uncompleted_parallel_actions.to_owned())))
-            }
-
-            self.tokio_runtime.shutdown_background();
 
             Ok::<(AgentTestFinishedRun, AgentTestFinishedRun), Box<dyn std::error::Error>>((server_context.test_data, self.test_data))
         })?;
@@ -334,19 +348,30 @@ impl AgentTestRunner {
     /// Checks which of the given parallel actions were done and deletes them from the queue if yes.
     /// Returns the remaining uncompleted actions
     async fn uncompleted_parallel_actions(&self, actions: Vec<AgentExpectedAction>) -> Result<Vec<AgentExpectedAction>> {
-        let action_filter = actions.clone().into_iter().map(async |a| self.check_parallel_action(&a).await);
-        if let Some(err) = action_filter.clone().find(|v| v.is_err()) {
-            err
+        let mut action_filter = vec![];
+        for action in actions.clone().into_iter() {
+            action_filter.push(self.check_parallel_action(&action).await);
+        }
+
+        if let Some((i, _)) = action_filter.iter().enumerate().find(|(_, v)| v.is_err()) {
+            Err(action_filter.into_iter().nth(i).unwrap().unwrap_err())
         } else {
-            action_filter.filter(|v| v.unwrap()).collect()
+            Ok(action_filter.into_iter()
+                .zip(actions)
+                .filter(|(completed, _)| !completed.as_ref().unwrap())
+                .map(|(_, action)| action)
+                .collect())
         }
     }
+
+    /// Checks whether the given action is completed
+    /// Returns `true` if it is and `false` if not
     async fn check_parallel_action(&self, action: &AgentExpectedAction) -> Result<bool> {
         match action {
-            AgentExpectedAction::File(name, maybe_content) => get_files(&self.docker, &self.container_id).await.,
+            AgentExpectedAction::File(name, maybe_content) => Ok(get_files(&self.docker, &self.container_id).await?.into_iter().any(|(n, c)| name == &n && maybe_content.clone().map(|v| v == c).unwrap_or(true))),
 
             // This action cannot be checked in parallel
-            _ => true
+            _ => Ok(true)
         }
     }
 
@@ -504,16 +529,16 @@ fn get_docker() -> Result<Docker> {
 /// returns the id of the started container
 async fn start_agent_container(docker: &Docker, image_name: &str) -> Result<String> {
     let env_vars = vec![
-        "MINION_API_BASE_URL=http://host.docker.internal:3000/api/",
-        "MINION_API_TOKEN=42",
+        "MINION_API_BASE_URL=http://host.docker.internal:3000/api/".to_owned(),
+        "MINION_API_TOKEN=42".to_owned(),
     ];
     let host_config = HostConfig {
         extra_hosts: Some(vec!["host.docker.internal:host-gateway".to_owned()]),
         ..Default::default()
     };
 
-    let container_config = Config {
-        image: Some(image_name),
+    let container_config = ContainerCreateBody {
+        image: Some(image_name.to_owned()),
         host_config: Some(host_config),
         env: Some(env_vars),
         ..Default::default()
@@ -535,14 +560,12 @@ async fn start_agent_container(docker: &Docker, image_name: &str) -> Result<Stri
 }
 
 async fn attach_outstreams(docker: &Docker, container_id: &str) -> Result<tokio::task::JoinHandle<()>> {
-    let attach_options = AttachContainerOptions::<&str> {
-        stdout: Some(true),
-        stderr: Some(true),
-        stdin: None,
-        stream: Some(true),
-        logs: Some(true),
-        ..Default::default()
-    };
+    let attach_options = AttachContainerOptionsBuilder::new()
+        .stdout(true)
+        .stderr(true)
+        .stream(true)
+        .logs(true)
+        .build();
 
     let mut stream = docker.attach_container(&container_id, Some(attach_options)).await?;
 
@@ -568,9 +591,7 @@ async fn attach_outstreams(docker: &Docker, container_id: &str) -> Result<tokio:
 /// Returns a map from the filenames to the file content.
 /// Filenames are given with path, so e.g. `dev/my_project/main.rs`
 async fn get_files(docker: &Docker, container_id: &str) -> Result<HashMap<String, String>> {
-    let options = DownloadFromContainerOptions {
-        path: "/app".to_string(),
-    };
+    let options = DownloadFromContainerOptionsBuilder::new().path("~/app").build();
 
     let mut tar_stream = docker.download_from_container(container_id, Some(options));
 
@@ -600,8 +621,9 @@ async fn get_files(docker: &Docker, container_id: &str) -> Result<HashMap<String
 fn main() {
     let test_env = AgentTestEnvironment::new()
         .with_task(&Task::new("Do nothing"))
-        .expect_llm_call(&LLMResponse::Message("Do nothing".to_owned()), None)
-        .expect_llm_call(&LLMResponse::Message("Do nothing".to_owned()), None)
+        // .expect_llm_call(&LLMResponse::Message("Do nothing".to_owned()), None)
+        // .expect_llm_call(&LLMResponse::Message("Do nothing".to_owned()), None)
+        .expect_file("test.txt", None)
         .expect_failure(None)
         ;
     match test_env.run("agent-42") {
@@ -611,7 +633,7 @@ fn main() {
                     println!("Test Result:");
                     match runner.test_failure() {
                         None => println!("Success!"),
-                        Some(err) => println!("Failure with reason {}", err),
+                        Some(err) => println!("Failure with reason: {}", err),
                     }
                 }
                 Err(err) => println!("An unrecoverable error occurred while stopping the agent: {}", err),
