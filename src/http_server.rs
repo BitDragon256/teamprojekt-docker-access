@@ -1,8 +1,8 @@
+use serde::Serialize;
 use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream, SocketAddr};
-use serde::Serialize;
+use std::net::{SocketAddr, TcpListener, TcpStream};
 
 #[derive(Debug)]
 pub enum Error {
@@ -110,7 +110,8 @@ impl HttpResponse {
     }
     pub fn json<T: Serialize>(mut self, content: &T) -> Self {
         self.body = serde_json::to_string(content).unwrap(); // this should not panic
-        self.headers.insert("Content-Type".to_owned(), "application/json".to_owned());
+        self.headers
+            .insert("Content-Type".to_owned(), "application/json".to_owned());
         self
     }
 }
@@ -121,7 +122,8 @@ fn format_status_code_message(status_code: StatusCode) -> String {
         200 => "200 OK",
         404 => "404 Not Found",
         _ => "42 Misc",
-    }.to_owned()
+    }
+    .to_owned()
 }
 
 // TODO move parts to separate functions
@@ -135,17 +137,22 @@ fn parse_http_request(content: &str) -> Result<HttpRequest> {
     let start_line = lines.next().ok_or(IR("Empty request".to_owned()))?;
     let mut start_line_parts = start_line.split_whitespace();
 
-    let method = match start_line_parts.next().ok_or(IR("Missing HTTP method".to_owned()))? {
+    let method = match start_line_parts
+        .next()
+        .ok_or(IR("Missing HTTP method".to_owned()))?
+    {
         "GET" => RequestType::GET,
         "POST" => RequestType::POST,
         m => return Err(IR(format!("Unsupported HTTP method: {}", m))),
     };
 
-    let request_target = start_line_parts.next()
+    let request_target = start_line_parts
+        .next()
         .ok_or(IR("Missing request target".to_owned()))?
         .to_string();
 
-    let protocol = start_line_parts.next()
+    let protocol = start_line_parts
+        .next()
         .ok_or(IR("Missing HTTP protocol".to_owned()))?
         .to_string();
 
@@ -182,7 +189,8 @@ fn parse_http_request(content: &str) -> Result<HttpRequest> {
 fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest> {
     // TODO timeout
     // TODO buffer size
-    let mut buf = [0;1000]; stream.read(&mut buf)?;
+    let mut buf = [0; 1000];
+    stream.read(&mut buf)?;
     let content = String::from_utf8_lossy(&buf).to_string();
     parse_http_request(&content)
 }
@@ -192,7 +200,10 @@ fn format_http_response(response: HttpResponse) -> Result<String> {
     let mut formatted_response = String::new();
 
     // hardcoding 200 OK as status for now
-    formatted_response.push_str(&format!("HTTP/1.1 {}\r\n", format_status_code_message(response.status_code)));
+    formatted_response.push_str(&format!(
+        "HTTP/1.1 {}\r\n",
+        format_status_code_message(response.status_code)
+    ));
 
     // headers
     for (key, value) in &response.headers {
@@ -227,9 +238,16 @@ impl<T: ServerContext> Server<T> {
     }
 
     /// Set handle for a specific endpoint.
-    pub fn with_endpoint(mut self, target: &str, callback: fn(HttpRequest, &mut T) -> HttpResponse) -> Result<Self> {
+    pub fn with_endpoint(
+        mut self,
+        target: &str,
+        callback: fn(HttpRequest, &mut T) -> HttpResponse,
+    ) -> Result<Self> {
         // self.handles.insert(endpoint.to_owned(), Box::new(handle));
-        self.handles.insert(format_relative_url(target).ok_or(Error::InvalidEndpoint(target.to_owned()))?, callback);
+        self.handles.insert(
+            format_relative_url(target).ok_or(Error::InvalidEndpoint(target.to_owned()))?,
+            callback,
+        );
         Ok(self)
     }
 
@@ -248,18 +266,23 @@ impl<T: ServerContext> Server<T> {
             match stream {
                 Ok(mut stream) => {
                     let mut request = read_http_request(&mut stream)?;
-                    request.request_target = format_relative_url(&request.request_target).ok_or(Error::InvalidRequestEndpoint(request.request_target.clone()))?;
+                    request.request_target = format_relative_url(&request.request_target).ok_or(
+                        Error::InvalidRequestEndpoint(request.request_target.clone()),
+                    )?;
 
-                    let response = self.handles
+                    let response = self
+                        .handles
                         .get(&request.request_target)
                         .map(|handle| handle(request.clone(), &mut self.context))
                         .unwrap_or_else(|| (self.else_handle)(request));
 
                     write_http_response(&mut stream, response)?;
 
-                    if self.context.should_terminate_server() { break; }
+                    if self.context.should_terminate_server() {
+                        break;
+                    }
                 }
-                Err(err) => return Err(Error::ConnectionFailed(format!("{}", err)))
+                Err(err) => return Err(Error::ConnectionFailed(format!("{}", err))),
             }
         }
 
