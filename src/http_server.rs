@@ -202,10 +202,9 @@ fn parse_http_request(content: &str) -> Result<HttpRequest> {
 }
 
 fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest> {
-    // TODO timeout
-    // TODO buffer size
-    let mut buf = [0; 1000];
-    stream.read_exact(&mut buf)?;
+    let mut buf = [0; 100000];
+    #[allow(clippy::unused_io_amount)]
+    stream.read(&mut buf)?;
     let content = String::from_utf8_lossy(&buf).to_string();
     parse_http_request(&content)
 }
@@ -237,7 +236,6 @@ fn format_http_response(response: HttpResponse) -> Result<String> {
 }
 
 fn write_http_response(stream: &mut TcpStream, response: HttpResponse) -> Result<()> {
-    // TODO timeout
     stream.write_all(format_http_response(response)?.as_bytes())?;
     Ok(())
 }
