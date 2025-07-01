@@ -4,6 +4,7 @@ use std::fmt::{Display, Formatter};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::str::Lines;
+use regex::Regex;
 
 #[derive(Debug)]
 pub(crate) enum Error {
@@ -23,10 +24,11 @@ impl Display for Error {
 impl std::error::Error for Error {}
 
 fn format_relative_url(url: &str) -> Option<String> {
-    if !url.ends_with("/") {
-        Some(format!("{url}/"))
+    let dedup_url = Regex::new(r"/+").unwrap().replace_all(url, "/").into_owned();
+    if !dedup_url.ends_with("/") {
+        Some(format!("{dedup_url}/"))
     } else {
-        Some(url.to_string())
+        Some(dedup_url)
     }
 }
 
