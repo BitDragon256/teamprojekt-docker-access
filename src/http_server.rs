@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::str::Lines;
 
 #[derive(Debug)]
 pub(crate) enum Error {
@@ -126,14 +127,12 @@ fn format_status_code_message(status_code: StatusCode) -> String {
     .to_owned()
 }
 
-// TODO move parts to separate functions
-/// Parses a raw HTTP request string into an `HttpRequest` struct.
-fn parse_http_request(content: &str) -> Result<HttpRequest> {
+/// Parses the HTTP request start line from the given lines iterator.
+/// Returns the remaining lines, HTTP method, request target, and protocol version.
+/// Errors if the start line is malformed or contains unsupported HTTP methods.
+fn parse_start_line(mut lines: Lines) -> Result<(Lines, RequestType, String, String)> {
     use Error::InvalidRequest as IR;
 
-    let mut lines = content.lines();
-
-    // parse the start line
     let start_line = lines.next().ok_or(IR("Empty request".to_owned()))?;
     let mut start_line_parts = start_line.split_whitespace();
 
@@ -156,8 +155,14 @@ fn parse_http_request(content: &str) -> Result<HttpRequest> {
         .ok_or(IR("Missing HTTP protocol".to_owned()))?
         .to_string();
 
-    // parse the headers
+    Ok((lines, method, request_target, protocol))
+}
+
+/// Parses HTTP headers from the given lines iterator until an empty line is encountered. Skips malformed headers without exactly one ':'
+/// Returns the remaining lines and a hash map of header key-value pairs.
+fn parse_http_headers(mut lines: Lines) -> (Lines, HashMap<String, String>) {
     let mut headers = HashMap::new();
+
     for line in &mut lines {
         if line.is_empty() {
             break;
@@ -174,7 +179,17 @@ fn parse_http_request(content: &str) -> Result<HttpRequest> {
         headers.insert(key, value);
     }
 
-    // body
+    (lines, headers)
+}
+
+/// Parses a raw HTTP request string into an `HttpRequest` struct.
+fn parse_http_request(content: &str) -> Result<HttpRequest> {
+    let lines = content.lines();
+
+    let (lines, method, request_target, protocol) = parse_start_line(lines)?;
+
+    let (lines, headers) = parse_http_headers(lines);
+
     let body = lines.collect::<Vec<_>>().join("\n");
 
     Ok(HttpRequest {
